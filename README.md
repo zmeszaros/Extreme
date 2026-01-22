@@ -40,90 +40,128 @@ A repository felépítése megfeleltethető az MT4 `MQL4` könyvtárának:
 
 Ezután MetaEditorban fordítsd le az indikátorokat és az EA-kat (vagy másold be az előre lefordított `.ex4` fájlokat az `Indicators` mappába).
 
-## Indikátorok röviden
+## Indikátorok részletesen (működési elv)
 
-### ExtremSuperTrend
+### ExtremSuperTrend – trendfázis ATR alapján
 
-Az `ExtremSuperTrend.mq4` egy ATR alapú SuperTrend indikátor.
-- Paraméterek:
-  - `ATR_Period` (alapértelmezetten 10)
-  - `ATR_Multiplier` (alapértelmezetten 3.0)
-- Két bufferrel jelöl trendet (fel/le), a chart ablakban rajzol.
+Az `Indicators/ExtremSuperTrend.mq4` egy klasszikus, ATR-alapú SuperTrend jellegű indikátor.
 
-### ExtremZigZag
+**Fő paraméterek**
+- `ATR_Period` (alapértelmezés: 10)
+- `ATR_Multiplier` (alapértelmezés: 3.0)
 
-Az `ExtremZigZag.mq4` a klasszikus ZigZag számítást végzi, majd a végén **szélsőérték szinteket** számol:
-- a kimeneten `extremHigh[0]` (buy szint) és `extremLow[0]` (sell szint) jelenik meg,
-- a számítás a ZigZag pontokból, `Step` és `Distance` paraméterekből képez jelölteket.
+**Számítási lényeg**
+- ATR-t számol (`iATR`), ebből egy távolságot képez: `distance = ATR_Multiplier * ATR`.
+- Medián árat vesz: `(High + Low) / 2`.
+- Ebből két sávot képez:
+  - `band_upper = medianPrice + distance`
+  - `band_lower = medianPrice - distance`
+- Egy `phase` állapotváltozóval (PHASE_NONE/PHASE_BUY/PHASE_SELL) kezeli a trendfázist.
 
-Fontosabb paraméterek:
-- `Type` (0: régi, 1: új számítási logika)
-- `Depth`, `BackStep`, `Deviation`
-- `Distance`, `Step`
+**Trendváltási feltételek (kódszintű logika)**
+- BUY fázisba vált, ha a záróár a korábbi down vonal fölé kerül:
+  - `Close[i] > buffer_line_down[i+1]`
+- SELL fázisba vált, ha a záróár a korábbi up vonal alá kerül:
+  - `Close[i] < buffer_line_up[i+1]`
 
-## Expert Advisor-ok (EA-k)
+**Mit ad az EA-nak?**
+- Egy irányszűrőt (BUY/SELL fázis), illetve potenciális „defenzív” kilépési/trendforduló jelzést.
 
-A két EA szerkezete nagy részben hasonló, a különbség a belépési / menedzsment logika részleteiben van:
+### ExtremZigZag – extremum szintek (buy/sell level) előállítása
 
-- `ExtremLimit.mq4` – *Limit* jellegű (függő) megbízásokkal dolgozó stratégia.
-- `ExtremStop.mq4` – *Stop* jellegű (függő) megbízásokkal dolgozó stratégia.
+Az `Indicators/ExtremZigZag.mq4` két részből áll:
+1. klasszikus ZigZag pontok (csúcs/völgy) keresése (`Depth`, `BackStep`, `Deviation`),
+2. ezekből **két kulcsszint** számítása a legfrissebb adatok alapján:
+   - `extremHigh[0]` → *buy level*
+   - `extremLow[0]` → *sell level*
 
-Mindkettő:
+**Fő paraméterek**
+- ZigZag: `Depth`, `BackStep`, `Deviation`
+- Szintképzés: `Step`, `Distance`
+- `Type` (0: régi, 1: új számítási logika; alapértelmezés: 1)
+
+**Szintképzés lényege**
+- A ZigZag pontokból a kód egy tömörített `zigzag[]` listát készít.
+- Ezután a `Type` szerint meghívja:
+  - `calculateByType0(...)` vagy
+  - `calculateByType1(...)`
+- A függvények a ZigZag pontok közti különbségből (`dif = zigzag[i] - zigzag[i-1]`) és a küszöbökből (`Step`, `Distance`) állítják elő a két szintet.
+
+**Type=1 (új) rövid értelmezés**
+- „Kisebb” mozgásoknál (`abs(dif) < Step`) jelölt szinteket képez:
+  - negatív dif esetén buy jelöltet,
+  - pozitív dif esetén sell jelöltet.
+- „Nagyobb” mozgásoknál a fordulóponttal megerősíti a szinteket, és ha már mindkét oldal megvan, leáll.
+
+**Mit ad az EA-nak?**
+- Két ár-szintet (buy/sell), amelyekhez a robot pending megbízásokat igazíthat.
+
+## Expert Advisor-ok (EA-k) – működési elv
+
+> Fontos: a `Experts/ExtremLimit.mq4` és `Experts/ExtremStop.mq4` a repository-ban UTF-16 formátumban található. Ez fordításra jó lehet, de GitHub-on és egyszerű szövegfeldolgozóval nehezebben elemezhető. A működési elv alábbi leírása a kódban látható paraméterezésből, DLL interfészekből és az indikátorok működéséből következik.
+
+### Közös alapok
+
+Mindkét EA:
 - erőforrásként használja az `ExtremZigZag` és `ExtremSuperTrend` indikátorokat (EX4 formában),
 - importálja az `Extrem.dll`-t,
-- tartalmaz naplózót (fájlos log), chart kommenteket és értesítéseket (MT4 push notification),
-- több instrumentumhoz (pl. EURCHF, USDCHF, EURGBP) definiál alapértékeket / lépésközöket.
+- tartalmaz naplózót (fájlos log), chart kommenteket és értesítéseket.
 
-### Főbb beállítások (extern paraméterek)
+### Állapotvédelem / szinkronizáció (DLL)
 
-Mindkét EA-ban megtalálhatóak (a lista nem teljes):
-- `Portion` – százalékos arány (kockázat / lot számítás alapja)
-- `Risk` – kockázati mód (Conservative / Normal / Aggressive)
-- `MaxTrades` – maximális kötésszám
-- `TargetProfit` – cél profit (0 esetén általában nincs fix TP cél)
-- `Multiplier` – lot növelési szorzó (grid / martingale jellegű skálázás)
-- `ManualStart` – kézi indítás
-- `OpenLimitsAtOnce` (csak Limit EA-ban) – limit megbízások egyszerre nyitása
-- `MassOrders`, `TrailingOrders` (Stop EA-ban) – pending-ek tömeges kezelése / trailing
-- `Defensive` – defenzív kilépés
-- `KeepAlive` – „életjel”/futás fenntartás jellegű logika
-- `ManagedOn` – menedzsment idősíkja
-- `AutoStartLot` / `StartLot` – induló lot automatikus vagy fix
-- `ExtremeMovements` – extrém mozgás szűrő (ATR alapú)
-- `ExitStrategy` – kilépési stratégia (SuperTrend / Peak-Valley / Manual)
-- `ExitObserver` + `ObserverStart`/`ObserverEnd` – idősáv alapú felügyelet
-- `MagicNumber` – egyedi EA azonosító
-- `Notifications` – push értesítések
-- `ControlPanel` – charton megjelenő vezérlőpanel
+A két EA importálja az alábbi függvényeket:
+- `isProcessingDLL()` / `setProcessingDLL(bool)`
+- `isEqualDLL(MqlDateTime&)`
+- `setLastOpenedBarDLL(MqlDateTime&)
 
-## Működési áttekintés (magas szint)
+**Tipikus szerepük**
+- védik a kereskedési logikát a többszörös tick feldolgozástól (ugyanazon bar/tick többszöri végrehajtása),
+- kritikus szakasz jellegű „processing” flag-et adnak (ne fusson párhuzamosan order nyitás/módosítás).
 
-1. **Indikátorokból származó szintek/jelzések**
-   - `ExtremZigZag` ad szélsőérték alapú buy/sell szinteket.
-   - `ExtremSuperTrend` trendfázist jelez ATR alapján.
-2. **Belépés**
-   - Az EA a konfigurációtól függően függő megbízásokat (limit/stop) helyez el a számolt szintekhez.
-3. **Pozíció- és kockázatkezelés**
-   - Több kötés kezelése (`MaxTrades`), lot skálázás (`Multiplier`).
-   - Spread / stop level / lot step stb. figyelembevétele (`SymbolProperty` jellegű logika).
-4. **Kilépés**
-   - `ExitStrategy` szerint: SuperTrend alapú, szélsőérték (peak-valley) alapú, vagy kézi.
-5. **Állapotvédelem / szinkronizáció**
-   - A DLL függvények (pl. `isProcessingDLL`, `setProcessingDLL`, `setLastOpenedBarDLL`) a versenyhelyzetek és többszörös tick feldolgozás csökkentését szolgálhatják.
+### Belépési koncepció (szintek + trendfázis)
+
+A rendszer alap gondolata:
+1. Az `ExtremZigZag` ad két szintet:
+   - `extremHigh` (buy level)
+   - `extremLow` (sell level)
+2. Az `ExtremSuperTrend` ad egy trend-állapotot (BUY/SELL fázis).
+3. Az EA a konfigurációtól függően pending megbízásokat helyez el a szintek környezetébe:
+   - **ExtremStop**: tipikusan kitörés jelleg (STOP pending-ek a szintek felé/irányába)
+   - **ExtremLimit**: tipikusan visszahúzódás jelleg (LIMIT pending-ek a szintekhez visszatérésre)
+
+### Pozíció- és kockázatkezelés
+
+A paraméterek alapján a robot képes:
+- több lépcsőben pozíciót építeni (`MaxTrades`),
+- lotot skálázni (`Multiplier`) – ez grid/martingale jellegű elemet jelezhet,
+- a lot indulását automatikusan vagy fixen kezelni (`AutoStartLot`, `StartLot`),
+- kockázati profilt választani (`Risk`: Conservative/Normal/Aggressive).
+
+### Kilépési koncepció (ExitStrategy)
+
+A kódban definiált kilépési módok:
+- `SUPER_TREND`: trendforduló / SuperTrend alapú zárás
+- `PEAK_VALLEY`: ZigZag szélsőérték (peak/valley) alapú zárás
+- `MANUAL`: kézi zárás (EA inkább menedzsel/figyel)
+
+További kapcsolódó opciók:
+- `Defensive`: defenzív kilépés (pl. trendforduló vagy kockázati esemény esetén agresszívebb zárás)
+- `TargetProfit`: kosár/cél profit elérésekor zárás
+- `ExitObserver`, `ObserverStart`, `ObserverEnd`: időablak alapú kilépési felügyelet
 
 ## Naplózás és megjelenítés
 
-- **Logger**: napló fájlba (`log_YYYY.MM.DD.log` jellegű név), különböző szintekkel (DEBUG/INFO/WARNING/ERROR).
-- **Chart comment**: az EA a charton összegzi a fő állapotot (kötésszám, lot, profit, stb.).
-- **Push értesítések**: MT4 `SendNotification` használatával.
+- **Logger**: fájl alapú napló (szintek: DEBUG/INFO/WARNING/ERROR)
+- **Chart komment**: futás közbeni állapot összegzés
+- **Értesítések**: MT4 push notification (`Notifications`)
 
 ## Biztonsági / használati megjegyzések
 
-- A stratégia grid/multiplikátoros elemeket tartalmazhat, ami **magas kockázatú**.
+- A paraméterek (különösen `Multiplier`, `MaxTrades`) alapján a stratégia tartalmazhat **pozíció-építést / skálázást**, ami **magas kockázatú**.
 - Valós számlán használat előtt javasolt:
   - backtest,
   - demo teszt,
-  - kis kockázatú beállítás (Conservative, alacsony MaxTrades, alacsony StartLot).
+  - konzervatív profil (alacsony lot, alacsony MaxTrades, óvatos Multiplier).
 
 ## Licenc
 
